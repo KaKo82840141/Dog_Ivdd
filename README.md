@@ -1,572 +1,240 @@
+IVDD Gait Classification (DeepLabCut → LSTM)
 
-# RNN for Human Activity Recognition - 2D Pose Input
+犬の歩行（DeepLabCut 2DキーポイントCSV）から IVDD (ivdd) / 正常 (normal) の2値分類を行うための学習・評価コードです。
+5キーポイント版（従来）に加え、3キーポイント版（left back paw / right back paw / tail set） も同梱しています。
 
-This experiment is the classification of human activities using a 2D pose time series dataset and an LSTM RNN.
-The idea is to prove the concept that using a series of 2D poses, rather than 3D poses or a raw 2D images, can produce an accurate estimation of the behaviour of a person or animal.
-This is a step towards creating a method of classifying an animal's current behaviour state and predicting it's likely next state, allowing for better interaction with an autonomous mobile robot.
+フレーム系列 → スライディングウィンドウ（既定: SEQ_LEN=60, STRIDE=30）
 
-## Objectives
+前処理（切替可能）
 
-The aims of this experiment are:
+train1系: z-score（ファイル単位）
 
--  To determine if 2D pose has comparable accuracy to 3D pose for use in activity recognition. This would allow the use of RGB only cameras for human and animal pose estimation, as opposed to RGBD or a large motion capture dataset.
+train2系: tail_set原点平行移動＋min-max（ファイル単位）
 
+ネットワーク: TimeDistributed(Dense→ReLU) → LSTM → LSTM → Dense(ロジット)
 
-- To determine if  2D pose has comparable accuracy to using raw RGB images for use in activity recognition. This is based on the idea that limiting the input feature vector can help to deal with a limited dataset, as is likely to occur in animal activity recognition, by allowing for a smaller model to be used (citation required).
+出力は**日付入り（YYYYMMDD-HHMMSS）**で保存
 
+ディレクトリ構成（正）
 
-- To verify the concept for use in future works involving behaviour prediction from motion in 2D images.
+※ この構成に合わせてコードのパスが固定されています。ivdd/ というフォルダはありません。
 
-The network used in this experiment is based on that of Guillaume Chevalier, 'LSTMs for Human Activity Recognition, 2016'  https://github.com/guillaume-chevalier/LSTM-Human-Activity-Recognition, available under the MIT License.
-Notable changes that have been made (other than accounting for dataset sizes) are:
- - Adapting for use with a large dataset ordered by class, using random sampling without replacement for mini-batch.  
- This allows for use of smaller batch sizes when using a dataset ordered by class. "It has been observed in practice that when using a larger batch there is a significant degradation in the quality of the model, as measured by its ability to generalize"  
-      _N.S Keskar, D. Mudigere, et al, 'On Large-Batch Training for Deep Learning: Generalization Gap and Sharp 
-      Minima', ICLR 2017_ https://arxiv.org/abs/1609.04836
-      
- - Exponentially decaying learning rate implemented
+.
+├── data
+│   ├── test
+│   │   ├── eval_csv                 # 評価用のDeepLabCut CSV（3段ヘッダ）を入れる
+│   │   └── eval_outputs             # 評価の出力先（自動生成）← eval_csv の「兄弟」
+│   └── train
+│       ├── fig                      # 学習曲線 (loss & accuracy) 画像
+│       ├── train_csv                # 学習用のDeepLabCut CSV（3段ヘッダ）を入れる
+│       ├── train1_model             # z-score 正規化モデルの保存先
+│       ├── train2_model             # tail_minmax 正規化モデルの保存先
+│       └── val_misclassified        # 検証で誤分類したウィンドウ一覧CSV
+├── environments
+│   ├── ML.yaml
+│   └── RNNhumanactivityrecognize.yaml
+└── scripts
+    ├── ivdd_train1.ipynb            # 5KP, z-score 版（既存）
+    ├── ivdd_train2.ipynb            # 5KP, tail_minmax 版（既存）
+    ├── ivdd_train_3kp.ipynb         # ★ 3KP 学習（z-score / tail_minmax 切替可）
+    ├── ivdd_eval.ipynb              # 5KP 評価（既存）
+    └── ivdd_eval_3kp.ipynb          # ★ 3KP 評価（z-score / tail_minmax 切替可）
 
+入力データ（DeepLabCut CSV）
 
+3段ヘッダ（例: scorer, bodyparts, coords）
 
-## Dataset overview
+5KP版：left back paw, right back paw, left front paw, right front paw, tail set
 
-(Data is available from https://drive.google.com/open?id=1IuZlyNjg6DMQE3iaO1Px6h1yLKgatynt
-Place dataset in folder structure as per DATASET_PATH. )
+3KP版：left back paw, right back paw, tail set
 
-The dataset consists of pose estimations, made using the software OpenPose (https://github.com/CMU-Perceptual-Computing-Lab/openpose's) on a subset of the Berkeley Multimodal Human Action Database (MHAD) dataset http://tele-immersion.citris-uc.org/berkeley_mhad.
+likelihood 列はオプション（ある場合は低品質点を欠損→補間）
 
-This dataset is comprised of 12 subjects doing the following 6 actions for 5 repetitions, filmed from 4 angles, repeated 5 times each.  
+キーポイント名の照合は空白/_- を無視して行いますが、基本は上記の英語ラベルで合わせてください。
 
-- JUMPING,
-- JUMPING_JACKS,
-- BOXING,
-- WAVING_2HANDS,
-- WAVING_1HAND,
-- CLAPPING_HANDS.
+ラベル推定（ファイル名規約）
 
-In total, there are 1438 videos (2 were missing) made up of 211200 individual frames.
+normal_...csv → 正常 (0)
 
-The below image is an example of the 4 camera views during the 'boxing' action for subject 1
+ivdd_...csv, ivdd1_...csv, ivdd2_...csv など → IVDD (1)
 
-![alt text](images/boxing_all_views.gif.png "Title")
+3KPコードは ivdd1 のような接尾数字も ivdd と判定します。
+5KPの古いスクリプトは厳密一致（ivdd / normal）前提の箇所があります。迷ったら 3KP 版の推論関数を参考にしてください。
 
+環境構築
+Conda（推奨）
+# 例: 環境ファイルから作成
+conda env create -f environments/ML.yaml
+# or
+conda env create -f environments/RNNhumanactivityrecognize.yaml
 
-The input for the LSTM is the 2D position of 18 joints across a timeseries of frames numbering n_steps (window-width), with an associated class label for the frame series.  
-A single frame's input (where j refers to a joint) is stored as:
+conda activate <作成した環境名>
 
-[  j0_x,  j0_y, j1_x, j1_y , j2_x, j2_y, j3_x, j3_y, j4_x, j4_y, j5_x, j5_y, j6_x, j6_y, j7_x, j7_y, j8_x, j8_y, j9_x, j9_y, j10_x, j10_y, j11_x, j11_y, j12_x, j12_y, j13_x, j13_y, j14_x, j14_y, j15_x, j15_y, j16_x, j16_y, j17_x, j17_y ]
+主要パッケージ
 
-For the following experiment, very little preprocessing has been done to the dataset.  
-The following steps were taken:
-1. openpose run on individual frames, for each subject, action and view, outputting JSON of 18 joint x and y position keypoints and accuracies per frame
-2. JSONs converted into txt format, keeping only x and y positions of each frame, action being performed during frame, and order of frames. This is used to create a database of associated activity class number and corresponding series of joint 2D positions
-3. No further prepossessing was performed.  
+Python 3.9+（目安）
 
-In some cases, multiple people were detected in each frame, in which only the first detection was used.
+TensorFlow 2.x（CPU実行に設定済み。GPUを使う場合は後述）
 
-The data has not been normalised with regards to subject position in the frame, motion across frame (if any), size of the subject, speed of action etc. It is essentially the raw 2D position of each joint viewed from a stationary camera.  
-In many cases, individual joints were not located and a position of [0.0,0.0] was given for that joint
+numpy / pandas / scikit-learn / matplotlib
 
-A summary of the dataset used for input is:
+コード先頭で CUDA_VISIBLE_DEVICES=-1 をセットして GPUを無効化しています。GPUを使う場合はその行を削除してください。
 
- - 211200 individual images 
- - n_steps = 32 frames (~=1.5s at 22Hz)
- - Images with noisy pose detection (detection of >=2 people) = 5132  
- - Training_split = 0.8
- - Overlap = 0.8125 (26 / 32) ie 26 frame overlap
-   - Length X_train = 22625 * 32 frames
-   - Length X_test = 5751 * 32 frames
-   
-Note that their is no overlap between test and train sets, which were seperated by activity repetition entirely, before creating the 26 of 32 frame overlap.
+使い方（3キーポイント版）
+1) 学習（scripts/ivdd_train_3kp.ipynb）
 
+data/train/train_csv/ に学習CSVを配置
 
+ノートブックを開き、冒頭のパス REPO_ROOT をあなたの環境に合わせて修正
 
+正規化方式を選択
 
-## Training and Results below: 
-Training took approximately 7 mins running on a single GTX1080Ti, and was run for 100 epochs with a batch size of 4096.
-Note that accuracy and ability to generalise can be improved by decreasing batch size, at the expense of training time. This can be shown experimentaly by leaving out a subject during training, and including them during testing only.
+NORMALIZE_MODE = "zscore" → train1系（保存先: data/train/train1_model/）
 
-Inference on a single datapoint, after training, takes approximately 0.3ms on the same system
+NORMALIZE_MODE = "tail_minmax" → train2系（保存先: data/train/train2_model/）
 
+実行
 
+保存物
 
-```python
+学習曲線: data/train/fig/curve_YYYYMMDD-HHMMSS.png
 
-import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-import tensorflow as tf  # Version 1.0.0 (some previous versions are used in past commits)
-from sklearn import metrics
-import random
-from random import randint
-import time
-import os
-```
+誤分類ウィンドウ: data/train/val_misclassified/val_misclassified_YYYYMMDD-HHMMSS.csv
 
-## Preparing dataset:
+モデル:
 
+data/train/train1_model/ivdd_lstm_3kp_YYYYMMDD-HHMMSS_best.keras
 
-```python
-# Useful Constants
+data/train/train1_model/ivdd_lstm_3kp_YYYYMMDD-HHMMSS_final.keras
+（tail_minmax の場合は train2_model/ 配下）
 
-# Output classes to learn how to classify
-LABELS = [    
-    "JUMPING",
-    "JUMPING_JACKS",
-    "BOXING",
-    "WAVING_2HANDS",
-    "WAVING_1HAND",
-    "CLAPPING_HANDS"
+2) 評価（scripts/ivdd_eval_3kp.ipynb）
 
-] 
-DATASET_PATH = "data/HAR_pose_activities/database/"
+data/test/eval_csv/ に評価CSVを配置
+（eval_outputs を eval_csv の“内側”に置かないでください）
 
-X_train_path = DATASET_PATH + "X_train.txt"
-X_test_path = DATASET_PATH + "X_test.txt"
+ノートブックを開き、冒頭のパス REPO_ROOT を修正
 
-y_train_path = DATASET_PATH + "Y_train.txt"
-y_test_path = DATASET_PATH + "Y_test.txt"
+NORMALIZE_MODE を 学習時と同じ にする
 
-n_steps = 32 # 32 timesteps per series
-```
+モデル指定
 
+CKPT_PATH に .keras フルパスを指定 または 空文字にしておくと
 
-```python
+data/train/train1_model/ → train2_model/ の順で 最新モデルを自動選択
 
-# Load the networks inputs
+実行
 
-def load_X(X_path):
-    file = open(X_path, 'r')
-    X_ = np.array(
-        [elem for elem in [
-            row.split(',') for row in file
-        ]], 
-        dtype=np.float32
-    )
-    file.close()
-    blocks = int(len(X_) / n_steps)
-    
-    X_ = np.array(np.split(X_,blocks))
+保存物
 
-    return X_ 
+出力フォルダ: data/test/eval_outputs/YYYYMMDD-HHMMSS/
 
-# Load the networks outputs
+window_predictions_*.csv
 
-def load_y(y_path):
-    file = open(y_path, 'r')
-    y_ = np.array(
-        [elem for elem in [
-            row.replace('  ', ' ').strip().split(' ') for row in file
-        ]], 
-        dtype=np.int32
-    )
-    file.close()
-    
-    # for 0-based indexing 
-    return y_ - 1
+file_level_predictions_*.csv
 
-X_train = load_X(X_train_path)
-X_test = load_X(X_test_path)
-#print X_test
+file_level_errors_*.csv
 
-y_train = load_y(y_train_path)
-y_test = load_y(y_test_path)
-# proof that it actually works for the skeptical: replace labelled classes with random classes to train on
-#for i in range(len(y_train)):
-#    y_train[i] = randint(0, 5)
+cm_window_*.png
 
-```
+cm_file_majority_*.png
 
-## Set Parameters:
+cm_file_meanprob_*.png
 
+roc_window_*.png
 
+5キーポイント版（既存スクリプト）
 
-```python
-# Input Data 
+scripts/ivdd_train1.ipynb（z-score） → data/train/train1_model/
 
-training_data_count = len(X_train)  # 4519 training series (with 50% overlap between each serie)
-test_data_count = len(X_test)  # 1197 test series
-n_input = len(X_train[0][0])  # num input parameters per timestep
+scripts/ivdd_train2.ipynb（tail_minmax） → data/train/train2_model/
 
-n_hidden = 34 # Hidden layer num of features
-n_classes = 6 
+scripts/ivdd_eval.ipynb（評価）
 
-#updated for learning-rate decay
-# calculated as: decayed_learning_rate = learning_rate * decay_rate ^ (global_step / decay_steps)
-decaying_learning_rate = True
-learning_rate = 0.0025 #used if decaying_learning_rate set to False
-init_learning_rate = 0.005
-decay_rate = 0.96 #the base of the exponential in the decay
-decay_steps = 100000 #used in decay every 60000 steps with a base of 0.96
+※ 5KPの古いラベル推定は ivdd/normal の厳密一致を仮定している箇所があり、
+ivdd1_... のような名前だと「ラベル不明」になる場合があります。
+その場合はファイル名を ivdd_... に変更するか、3KP版の推定ロジックを移植してください。
 
-global_step = tf.Variable(0, trainable=False)
-lambda_loss_amount = 0.0015
+モデル・ハイパーパラメータ（既定）
 
-training_iters = training_data_count *100  # Loop 100 times on the dataset, ie 100 epochs
-batch_size = 4096
-display_iter = batch_size*8  # To show test set accuracy during training
+入力: (T=60, D)（D=10 5KP / D=6 3KP）
 
-print("(X shape, y shape, every X's mean, every X's standard deviation)")
-print(X_train.shape, y_test.shape, np.mean(X_test), np.std(X_test))
-print("\nThe dataset has not been preprocessed, is not normalised etc")
+事前補正: 欠損補間（線形→前方→後方）、0埋め
 
+正規化:
 
+z-score（ファイル単位, 各次元）
 
-```
+tail_minmax（フレーム毎に tail set を原点へ平行移動 → 各次元を min-max）
 
-    (X shape, y shape, every X's mean, every X's standard deviation)
-    ((22625, 32, 36), (5751, 1), 251.01117, 126.12204)
-    
-    The dataset has not been preprocessed, is not normalised etc
+ネットワーク:
 
+TimeDistributed(Dense(n_hidden), ReLU)
 
-## Utility functions for training:
+LSTM(n_hidden, return_sequences=True) → LSTM(n_hidden)
 
+Dense(1)（sigmoidで確率化。2出力の学習物にも評価側で対応済み）
 
-```python
-def LSTM_RNN(_X, _weights, _biases):
-    # model architecture based on "guillaume-chevalier" and "aymericdamien" under the MIT license.
+学習:
 
-    _X = tf.transpose(_X, [1, 0, 2])  # permute n_steps and batch_size
-    _X = tf.reshape(_X, [-1, n_input])   
-    # Rectifies Linear Unit activation function used
-    _X = tf.nn.relu(tf.matmul(_X, _weights['hidden']) + _biases['hidden'])
-    # Split data because rnn cell needs a list of inputs for the RNN inner loop
-    _X = tf.split(_X, n_steps, 0) 
+loss=BinaryCrossentropy(from_logits=True)
 
-    # Define two stacked LSTM cells (two recurrent layers deep) with tensorflow
-    lstm_cell_1 = tf.contrib.rnn.BasicLSTMCell(n_hidden, forget_bias=1.0, state_is_tuple=True)
-    lstm_cell_2 = tf.contrib.rnn.BasicLSTMCell(n_hidden, forget_bias=1.0, state_is_tuple=True)
-    lstm_cells = tf.contrib.rnn.MultiRNNCell([lstm_cell_1, lstm_cell_2], state_is_tuple=True)
-    outputs, states = tf.contrib.rnn.static_rnn(lstm_cells, _X, dtype=tf.float32)
+optimizer=Adam(lr=1e-4)
 
-    # A single output is produced, in style of "many to one" classifier, refer to http://karpathy.github.io/2015/05/21/rnn-effectiveness/ for details
-    lstm_last_output = outputs[-1]
-    
-    # Linear activation
-    return tf.matmul(lstm_last_output, _weights['out']) + _biases['out']
+ReduceLROnPlateau(factor=0.5, patience=5, min_lr=1e-5)
 
+EarlyStopping は未使用
 
-def extract_batch_size(_train, _labels, _unsampled, batch_size):
-    # Fetch a "batch_size" amount of data and labels from "(X|y)_train" data. 
-    # Elements of each batch are chosen randomly, without replacement, from X_train with corresponding label from Y_train
-    # unsampled_indices keeps track of sampled data ensuring non-replacement. Resets when remaining datapoints < batch_size    
-    
-    shape = list(_train.shape)
-    shape[0] = batch_size
-    batch_s = np.empty(shape)
-    batch_labels = np.empty((batch_size,1)) 
+分割: ファイル単位（リーク防止）
 
-    for i in range(batch_size):
-        # Loop index
-        # index = random sample from _unsampled (indices)
-        index = random.choice(_unsampled)
-        batch_s[i] = _train[index] 
-        batch_labels[i] = _labels[index]
-        _unsampled.remove(index)
-
-
-    return batch_s, batch_labels, _unsampled
-
-
-def one_hot(y_):
-    # One hot encoding of the network outputs
-    # e.g.: [[5], [0], [3]] --> [[0, 0, 0, 0, 0, 1], [1, 0, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0]]
-    
-    y_ = y_.reshape(len(y_))
-    n_values = int(np.max(y_)) + 1
-    return np.eye(n_values)[np.array(y_, dtype=np.int32)]  # Returns FLOATS
-
-
-```
-
-## Build the network:
-
-
-```python
-
-# Graph input/output
-x = tf.placeholder(tf.float32, [None, n_steps, n_input])
-y = tf.placeholder(tf.float32, [None, n_classes])
-
-# Graph weights
-weights = {
-    'hidden': tf.Variable(tf.random_normal([n_input, n_hidden])), # Hidden layer weights
-    'out': tf.Variable(tf.random_normal([n_hidden, n_classes], mean=1.0))
-}
-biases = {
-    'hidden': tf.Variable(tf.random_normal([n_hidden])),
-    'out': tf.Variable(tf.random_normal([n_classes]))
-}
-
-pred = LSTM_RNN(x, weights, biases)
-
-# Loss, optimizer and evaluation
-l2 = lambda_loss_amount * sum(
-    tf.nn.l2_loss(tf_var) for tf_var in tf.trainable_variables()
-) # L2 loss prevents this overkill neural network to overfit the data
-cost = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(labels=y, logits=pred)) + l2 # Softmax loss
-if decaying_learning_rate:
-    learning_rate = tf.train.exponential_decay(init_learning_rate, global_step*batch_size, decay_steps, decay_rate, staircase=True)
-
-
-#decayed_learning_rate = learning_rate * decay_rate ^ (global_step / decay_steps) #exponentially decayed learning rate
-optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate).minimize(cost,global_step=global_step) # Adam Optimizer
-
-correct_pred = tf.equal(tf.argmax(pred,1), tf.argmax(y,1))
-accuracy = tf.reduce_mean(tf.cast(correct_pred, tf.float32))
-
-
-```
-
-## Train the network:
-
-
-```python
-test_losses = []
-test_accuracies = []
-train_losses = []
-train_accuracies = []
-sess = tf.InteractiveSession(config=tf.ConfigProto(log_device_placement=True))
-init = tf.global_variables_initializer()
-sess.run(init)
-
-# Perform Training steps with "batch_size" amount of data at each loop. 
-# Elements of each batch are chosen randomly, without replacement, from X_train, 
-# restarting when remaining datapoints < batch_size
-step = 1
-time_start = time.time()
-unsampled_indices = range(0,len(X_train))
-
-while step * batch_size <= training_iters:
-    #print (sess.run(learning_rate)) #decaying learning rate
-    #print (sess.run(global_step)) # global number of iterations
-    if len(unsampled_indices) < batch_size:
-        unsampled_indices = range(0,len(X_train)) 
-    batch_xs, raw_labels, unsampled_indicies = extract_batch_size(X_train, y_train, unsampled_indices, batch_size)
-    batch_ys = one_hot(raw_labels)
-    # check that encoded output is same length as num_classes, if not, pad it 
-    if len(batch_ys[0]) < n_classes:
-        temp_ys = np.zeros((batch_size, n_classes))
-        temp_ys[:batch_ys.shape[0],:batch_ys.shape[1]] = batch_ys
-        batch_ys = temp_ys
-       
-    
-
-    # Fit training using batch data
-    _, loss, acc = sess.run(
-        [optimizer, cost, accuracy],
-        feed_dict={
-            x: batch_xs, 
-            y: batch_ys
-        }
-    )
-    train_losses.append(loss)
-    train_accuracies.append(acc)
-    
-    # Evaluate network only at some steps for faster training: 
-    if (step*batch_size % display_iter == 0) or (step == 1) or (step * batch_size > training_iters):
-        
-        # To not spam console, show training accuracy/loss in this "if"
-        print("Iter #" + str(step*batch_size) + \
-              ":  Learning rate = " + "{:.6f}".format(sess.run(learning_rate)) + \
-              ":   Batch Loss = " + "{:.6f}".format(loss) + \
-              ", Accuracy = {}".format(acc))
-        
-        # Evaluation on the test set (no learning made here - just evaluation for diagnosis)
-        loss, acc = sess.run(
-            [cost, accuracy], 
-            feed_dict={
-                x: X_test,
-                y: one_hot(y_test)
-            }
-        )
-        test_losses.append(loss)
-        test_accuracies.append(acc)
-        print("PERFORMANCE ON TEST SET:             " + \
-              "Batch Loss = {}".format(loss) + \
-              ", Accuracy = {}".format(acc))
-
-    step += 1
-
-print("Optimization Finished!")
-
-# Accuracy for test data
-
-one_hot_predictions, accuracy, final_loss = sess.run(
-    [pred, accuracy, cost],
-    feed_dict={
-        x: X_test,
-        y: one_hot(y_test)
-    }
-)
-
-test_losses.append(final_loss)
-test_accuracies.append(accuracy)
-
-print("FINAL RESULT: " + \
-      "Batch Loss = {}".format(final_loss) + \
-      ", Accuracy = {}".format(accuracy))
-time_stop = time.time()
-print("TOTAL TIME:  {}".format(time_stop - time_start))
-```
-
-    Iter #512:  Learning rate = 0.005000:   Batch Loss = 4.315274, Accuracy = 0.15234375
-    PERFORMANCE ON TEST SET:             Batch Loss = 3.68809938431, Accuracy = 0.205529466271
-    Iter #4096:  Learning rate = 0.005000:   Batch Loss = 3.057283, Accuracy = 0.263671875
-    PERFORMANCE ON TEST SET:             Batch Loss = 3.04467487335, Accuracy = 0.262215256691
-    Iter #8192:  Learning rate = 0.005000:   Batch Loss = 2.814128, Accuracy = 0.345703125
-    
-    ...(printouts not displayed)  
-
-
-    Iter #6148096:  Learning rate = 0.000414:   Batch Loss = 0.323380, Accuracy = 0.990234375
-    PERFORMANCE ON TEST SET:             Batch Loss = 0.354190647602, Accuracy = 0.974091470242
+クラス重み: 自動算出（存在クラスが両方ある場合のみ）
 
-
-## Results:
+よくあるエラーと対処
 
+FileNotFoundError: 評価用CSVが見つかりません
+→ data/test/eval_csv/ にCSVが入っているか、EVAL_CSV_DIR のパスを確認。
 
+eval_outputs が eval_csv の内側にできてしまう
+→ 評価コードで OUT_BASE = os.path.join(os.path.dirname(EVAL_CSV_DIR), "eval_outputs") を使用。
+assert os.path.basename(EVAL_CSV_DIR) == "eval_csv" も入れて誤作成を防止済み。
 
+ValueError: ラベル不明
+→ ファイル名に normal または ivdd（ivdd1 など含む）を入れてください。
 
-```python
-# (Inline plots: )
-%matplotlib inline
-
-font = {
-    'family' : 'Bitstream Vera Sans',
-    'weight' : 'bold',
-    'size'   : 18
-}
-matplotlib.rc('font', **font)
-
-width = 12
-height = 12
-plt.figure(figsize=(width, height))
-
-indep_train_axis = np.array(range(batch_size, (len(train_losses)+1)*batch_size, batch_size))
-#plt.plot(indep_train_axis, np.array(train_losses),     "b--", label="Train losses")
-plt.plot(indep_train_axis, np.array(train_accuracies), "g--", label="Train accuracies")
-
-indep_test_axis = np.append(
-    np.array(range(batch_size, len(test_losses)*display_iter, display_iter)[:-1]),
-    [training_iters]
-)
-#plt.plot(indep_test_axis, np.array(test_losses), "b-", linewidth=2.0, label="Test losses")
-plt.plot(indep_test_axis, np.array(test_accuracies), "b-", linewidth=2.0, label="Test accuracies")
-print len(test_accuracies)
-print len(train_accuracies)
+IndexError: index 1 is out of bounds...（評価時）
+→ 学習が Dense(1) のシグモイドなのに、評価で2クラスsoftmax前提の列アクセスをしている場合。
+3KP評価コードは logitsの形状（1 or 2）に自動対応しています。
 
-plt.title("Training session's Accuracy over Iterations")
-plt.legend(loc='lower right', shadow=True)
-plt.ylabel('Training Accuracy')
-plt.xlabel('Training Iteration')
+指定キーポイントが見つからない
+→ CSVヘッダの bodyparts 名を確認。3KPなら
+left back paw / right back paw / tail set を含む必要があります。
 
-plt.show()
+GPUを使いたい
+→ コード先頭の os.environ["CUDA_VISIBLE_DEVICES"] = "-1" を削除、
+かつ GPU対応TFをインストールしてください。
 
-# Results
+変更ポイント（本リポジトリの実装方針）
 
-predictions = one_hot_predictions.argmax(1)
+すべての成果物（モデル・画像・CSV）に YYYYMMDD-HHMMSS を付与して上書きを回避
 
-print("Testing Accuracy: {}%".format(100*accuracy))
+評価出力を data/test/eval_outputs/<timestamp>/ に統一（eval_csvの兄弟）
 
-print("")
-print("Precision: {}%".format(100*metrics.precision_score(y_test, predictions, average="weighted")))
-print("Recall: {}%".format(100*metrics.recall_score(y_test, predictions, average="weighted")))
-print("f1_score: {}%".format(100*metrics.f1_score(y_test, predictions, average="weighted")))
+学習曲線は 1枚画像（loss & accuracyの2サブプロット）
 
-print("")
-print("Confusion Matrix:")
-print("Created using test set of {} datapoints, normalised to % of each class in the test dataset".format(len(y_test)))
-confusion_matrix = metrics.confusion_matrix(y_test, predictions)
+誤分類ウィンドウ を学習時検証で data/train/val_misclassified/ に保存
 
+参考：パラメータの主な変更地点
 
-#print(confusion_matrix)
-normalised_confusion_matrix = np.array(confusion_matrix, dtype=np.float32)/np.sum(confusion_matrix)*100
+SEQ_LEN, STRIDE: 学習・評価スクリプト先頭付近
 
+キーポイント: KEYPOINTS リスト
 
-# Plot Results: 
-width = 12
-height = 12
-plt.figure(figsize=(width, height))
-plt.imshow(
-    normalised_confusion_matrix, 
-    interpolation='nearest', 
-    cmap=plt.cm.Blues
-)
-plt.title("Confusion matrix \n(normalised to % of total test data)")
-plt.colorbar()
-tick_marks = np.arange(n_classes)
-plt.xticks(tick_marks, LABELS, rotation=90)
-plt.yticks(tick_marks, LABELS)
-plt.tight_layout()
-plt.ylabel('True label')
-plt.xlabel('Predicted label')
-plt.show()
+正規化方式: NORMALIZE_MODE = "zscore" or "tail_minmax"
 
-```
+ルートパス: REPO_ROOT
 
+ライセンス / 謝辞
 
+DeepLabCut ベースの座標CSVを用いた研究用途のテンプレートです。
 
-```python
-sess.close()
-
-```
-
-![Accuracy](images/accuracy.png)
-![confusion matrix](images/confusion_matrix.png "Title")
-
-## Conclusion
-
-Final accuracy of >90% is pretty good, considering that training takes about 7 minutes.
-
-Noticeable confusion between activities of Clapping Hands and Boxing, and between Jumping Jacks and Waving Two Hands which is understandable.
-
-In terms of the applicability of this to a wider dataset, I would imagine that it would be able to work for any activities in which the training included a views from all angles to be tested on. It would be interesting to see it's applicability to camera angles in between the 4 used in this dataset, without training on them specifically.
-
- Overall, this experiment validates the idea that 2D pose can be used for at least human activity recognition, and provides verification to continue onto use of 2D pose for behaviour estimation in both people and animals
- 
-
- ### With regards to Using LSTM-RNNs
- - Batch sampling
-     - It is neccessary to ensure you are not just sampling classes one at a time! (ie y_train is ordered by class and batch chosen in order)The use of random sampling of batches without replacement from the training data resolves this.    
- 
- - Architecture
-     - Testing has been run using a variety of hidden units per LSTM cell, with results showing that testing accuracy achieves a higher score when using a number of hidden cells approximately equal to that of the input, ie 34.
-   
-  
-
-## Future Works
-
-Inclusion of :
-
- - A pipeline for qualitative results
- - A validation dataset
- - Momentum     
- - Normalise input data (each point with respect to distribution of itself only)
- - Dropout
- - Comparison of effect of changing batch size
- 
-
-Further research will be made into the use on more subtle activity classes, such as walking versus running, agitated movement versus calm movement, and perhaps normal versus abnormal behaviour, based on a baseline of normal motion.
-
-
-## References
-
-The dataset can be found at http://tele-immersion.citris-uc.org/berkeley_mhad released under the BSD-2 license
->Copyright (c) 2013, Regents of the University of California All rights reserved.
-
-The network used in this experiment is based on the following, available under the [MIT License](https://github.com/guillaume-chevalier/LSTM-Human-Activity-Recognition/blob/master/LICENSE). :
-> Guillaume Chevalier, LSTMs for Human Activity Recognition, 2016
-> https://github.com/guillaume-chevalier/LSTM-Human-Activity-Recognition
-
-
-
-
-```python
-# Let's convert this notebook to a README for the GitHub project's title page:
-!jupyter nbconvert --to markdown LSTM.ipynb
-!mv LSTM.md README.md
-```
-
-## 
+本リポジトリのコードは研究・教育用途での使用を想定しています。商用利用時は各依存ライブラリのライセンスをご確認ください。
